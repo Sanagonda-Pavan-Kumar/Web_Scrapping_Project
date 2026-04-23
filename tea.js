@@ -1,6 +1,6 @@
 const { chromium } = require("playwright");
 const fs = require("fs");
-const xlsx = require("xlsx"); // Import the xlsx package for Excel export
+const xlsx = require("xlsx");
 
 (async () => {
   const browser = await chromium.launch({
@@ -25,81 +25,103 @@ const xlsx = require("xlsx"); // Import the xlsx package for Excel export
       waitUntil: "domcontentloaded",
       timeout: 60000,
     });
+
     await page.waitForSelector("#pagination", { timeout: 40000 });
-    await page.selectOption("#pagination", "500");
-    await page.waitForTimeout(2000); // Allow time for the page to load
-  }
 
-  async function extractMemberDetails() {
-    return await page.evaluate(() => {
-      const getText = (header) => {
-        const headingElement = Array.from(document.querySelectorAll("h4")).find(
-          (h) => h.innerText.trim() === header
-        );
-        return headingElement
-          ? headingElement.closest(".location-heading-brand").querySelector("p").innerText.trim()
-          : "";
-      };
+    // Change pagination to 500 and wait for reload properly
+    await Promise.all([
+      page.waitForLoadState("networkidle"),
+      page.selectOption("#pagination", "500"),
+    ]);
 
-      return {
-        Name: getText("Name"),
-        Designation: getText("Designation"),
-        Email: getText("Email").replace(/<.*?>/g, "").trim(),
-        State: getText("State"),
-        Region: getText("Region"),
-        City: getText("City"),
-      };
-    });
+    await page.waitForSelector(".view-details-btn a");
   }
 
   try {
     await navigateToMainPage();
 
-    // Get all "View Details" links
+    // Get all detail links
     const detailLinks = await page.$$eval(
       ".view-details-btn a",
       (links) => links.map((link) => link.href)
     );
 
+    console.log(`Total links found: ${detailLinks.length}`);
+
     const allMemberData = [];
 
+    // Loop through each link (open in new tab)
     for (const link of detailLinks) {
-      // Navigate to each member's details page
-      await page.goto(link, { waitUntil: "domcontentloaded" });
+      const detailPage = await context.newPage();
 
-      // Extract the company name
-      const companyName = await page.evaluate(() => {
-        const companyNameElement = document.querySelector("div.container-xxl h2");
-        return companyNameElement ? companyNameElement.innerText.trim() : "Company name not found";
-      });
+      try {
+        await detailPage.goto(link, {
+          waitUntil: "domcontentloaded",
+          timeout: 60000,
+        });
 
-      // Extract the member data
-      const memberData = await extractMemberDetails();
-      console.log("Extracted Member Data:", { CompanyName: companyName, ...memberData });
+        await detailPage.waitForSelector("div.container-xxl h2");
 
-      // Save the member data
-      allMemberData.push({
-        CompanyName: companyName,
-        ...memberData,
-      });
+        // Extract company name
+        const companyName = await detailPage.evaluate(() => {
+          const el = document.querySelector("div.container-xxl h2");
+          return el ? el.innerText.trim() : "Company name not found";
+        });
 
-      // Go back to the main directory page
-      await navigateToMainPage();
+        // Extract member details
+        const memberData = await detailPage.evaluate(() => {
+          const getText = (header) => {
+            const headingElement = Array.from(
+              document.querySelectorAll("h4")
+            ).find((h) => h.innerText.trim() === header);
+
+            return headingElement
+              ? headingElement
+                  .closest(".location-heading-brand")
+                  .querySelector("p").innerText.trim()
+              : "";
+          };
+
+          return {
+            Name: getText("Name"),
+            Designation: getText("Designation"),
+            Email: getText("Email").replace(/<.*?>/g, "").trim(),
+            State: getText("State"),
+            Region: getText("Region"),
+            City: getText("City"),
+          };
+        });
+
+        const finalData = {
+          CompanyName: companyName,
+          ...memberData,
+        };
+
+        console.log("Extracted:", finalData);
+
+        allMemberData.push(finalData);
+      } catch (err) {
+        console.error(`Failed for ${link}:`, err.message);
+      } finally {
+        await detailPage.close(); // always close tab
+      }
     }
 
-    // Write all data to a JSON file
-    fs.writeFileSync("allMembersData.json", JSON.stringify(allMemberData, null, 2));
+    // Save JSON
+    fs.writeFileSync(
+      "allMembersData.json",
+      JSON.stringify(allMemberData, null, 2)
+    );
 
-    // Write all data to an Excel file
+    // Save Excel
     const workbook = xlsx.utils.book_new();
     const worksheet = xlsx.utils.json_to_sheet(allMemberData);
     xlsx.utils.book_append_sheet(workbook, worksheet, "Members");
     xlsx.writeFile(workbook, "allMembersData.xlsx");
 
-    console.log("Data extracted and saved to allMembersData.json and allMembersData.xlsx");
-
+    console.log("✅ Data saved to JSON & Excel");
   } catch (error) {
-    console.error("Error:", error.message);
+    console.error("❌ Error:", error.message);
   } finally {
     await browser.close();
   }
